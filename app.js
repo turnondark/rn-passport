@@ -2,7 +2,11 @@
    Course data arrives encrypted (data.enc.json); progress lives in localStorage and can sync to a private GitHub gist. */
 "use strict";
 
-const LS_STATE = "rnp-state-v1", LS_KEY = "rnp-key-v1";
+const LS_STATE = "rnp-state-v1", LS_KEY = "rnp-key-v1", LS_USER = "rnp-user";
+const USERS = ["JUNE", "KIJ"];
+let USER = null;
+const stateKey = () => `${LS_STATE}-${USER}`;
+const gistFile = () => `rn-passport-${USER}.json`;
 const DEFAULT_START = "2026-11-23";
 const PASS_DAILY = 0.7, PASS_PHASE = 0.65;
 const DAILY_SIZE = 30;      // Mon-Fri quiz, untimed
@@ -50,8 +54,9 @@ async function deriveKey(pass, enc) {
 async function boot() {
   let enc;
   try { enc = await loadEnc(); } catch (e) { $("#app").innerHTML = `<div class="boot">โหลดข้อมูลไม่สำเร็จ ตรวจอินเทอร์เน็ตแล้วรีเฟรชอีกครั้ง</div>`; return; }
-  const raw = lsGet(LS_KEY);
-  if (raw) {
+  const raw = lsGet(LS_KEY), u = lsGet(LS_USER);
+  if (raw && USERS.includes(u)) {
+    USER = u;
     try {
       const key = await crypto.subtle.importKey("raw", b64d(raw), "AES-GCM", false, ["decrypt"]);
       return start(await decryptWith(key, enc));
@@ -59,32 +64,48 @@ async function boot() {
   }
   showLock(enc);
 }
-function showLock(enc, err) {
+function showLock(enc, err, picked) {
+  const sel = picked || lsGet(LS_USER) || "";
   $("#app").innerHTML = `<div class="lockscreen"><form class="card" id="lockForm">
     <span class="mono small muted">RN PASSPORT · NCLEX</span>
-    <h2>ใส่รหัสผ่านเพื่อเปิดเนื้อหา</h2>
-    <p class="muted small">ใส่ครั้งเดียวต่อเครื่อง เนื้อหาในเว็บนี้ถูกเข้ารหัสไว้</p>
-    <input type="password" id="pass" autocomplete="current-password" placeholder="XXXX-XXXX-XXXX" required>
+    <h2>เข้าสู่ระบบ</h2>
+    <p class="muted small">เลือกชื่อผู้ใช้ แล้วใส่รหัสผ่าน ความคืบหน้าของแต่ละคนเก็บแยกกัน</p>
+    <div class="btns" role="radiogroup" aria-label="ชื่อผู้ใช้">${USERS.map((u) => `<button type="button" class="btn ${u === sel ? "primary" : ""}" data-user="${u}" aria-pressed="${u === sel}" style="flex:1">${u}</button>`).join("")}</div>
+    <input type="password" id="pass" inputmode="numeric" autocomplete="current-password" placeholder="รหัสผ่าน" required>
     ${err ? `<p class="small" style="color:var(--bad)">${esc(err)}</p>` : ""}
     <button class="btn primary block" type="submit">เปิด</button></form></div>`;
+  let chosen = sel;
+  document.querySelectorAll("[data-user]").forEach((b) => b.onclick = () => {
+    chosen = b.dataset.user;
+    document.querySelectorAll("[data-user]").forEach((x) => { const on = x.dataset.user === chosen; x.classList.toggle("primary", on); x.setAttribute("aria-pressed", on); });
+  });
   $("#lockForm").onsubmit = async (e) => {
     e.preventDefault();
-    const btn = e.target.querySelector("button"); btn.disabled = true; btn.textContent = "กำลังตรวจ…";
+    if (!USERS.includes(chosen)) { showLock(enc, "กรุณาเลือกชื่อผู้ใช้ก่อน"); return; }
+    const btn = e.target.querySelector("button[type=submit]"); btn.disabled = true; btn.textContent = "กำลังตรวจ…";
     try {
       const key = await deriveKey($("#pass").value, enc);
       const data = await decryptWith(key, enc);
       lsSet(LS_KEY, b64e(await crypto.subtle.exportKey("raw", key)));
+      lsSet(LS_USER, chosen); USER = chosen;
       start(data);
-    } catch (err) { showLock(enc, "รหัสผ่านไม่ถูกต้อง ลองใหม่อีกครั้ง"); }
+    } catch (err) { showLock(enc, "รหัสผ่านไม่ถูกต้อง ลองใหม่อีกครั้ง", chosen); }
   };
 }
 
 /* ---------- state ---------- */
 function freshState() { return { v: 1, updated: 0, start: DEFAULT_START, days: {}, qs: {}, sync: { token: "", gist: "" } }; }
-function loadState() { try { const r = lsGet(LS_STATE); if (r) return Object.assign(freshState(), JSON.parse(r)); } catch (e) { } return freshState(); }
+function loadState() {
+  try {
+    let r = lsGet(stateKey());
+    if (!r && lsGet(LS_STATE)) { r = lsGet(LS_STATE); try { localStorage.removeItem(LS_STATE); } catch (e) { } } // progress saved before user IDs existed
+    if (r) return Object.assign(freshState(), JSON.parse(r));
+  } catch (e) { }
+  return freshState();
+}
 function save(push = true) {
   S.updated = Date.now();
-  lsSet(LS_STATE, JSON.stringify(S));
+  lsSet(stateKey(), JSON.stringify(S));
   if (push && S.sync.token) { clearTimeout(syncTimer); syncTimer = setTimeout(syncPush, 2000); }
 }
 
@@ -220,7 +241,7 @@ function header(day) {
   const lag = calIdx < 0 ? 0 : calIdx - ci;
   const status = lag > 0 ? `<span class="pill bad">ช้ากว่าแผน ${lag} วัน</span>` : lag < 0 ? `<span class="pill ok">เร็วกว่าแผน ${-lag} วัน</span>` : `<span class="pill ok">ตรงตามแผน</span>`;
   const examDate = PLAN[PLAN.length - 1].date;
-  return `<header class="pass"><div class="row"><span class="eyebrow">RN Passport · NCLEX-RN</span>${status}</div>
+  return `<header class="pass"><div class="row"><span class="eyebrow">RN Passport · ${esc(USER)}</span>${status}</div>
     <h1>วันที่ ${day.idx + 1} · สัปดาห์ ${day.week + 1}</h1>
     <div class="row small"><span>${esc(day.label)}</span><span class="mono">${thDate(day.date)}</span></div>
     <div class="bar"><i style="width:${(doneCount / PLAN.length) * 100}%"></i></div>
@@ -312,7 +333,7 @@ function viewSettings() {
     <p class="small muted" id="syncMsg">${S.sync.gist ? "เชื่อมกับ gist แล้ว" : "ยังไม่ได้เชื่อม"}</p></section>
     <section class="card"><h3>สำรอง / ย้ายข้อมูล</h3><p class="small muted">คัดลอกรหัสนี้ไปวางในเครื่องอื่น หรือเก็บไว้กันข้อมูลหาย</p>
     <textarea id="backup" spellcheck="false"></textarea><div class="btns"><button class="btn" data-act="exportB">สร้างรหัสสำรอง</button><button class="btn" data-act="importB">นำเข้ารหัส</button></div></section>
-    <section class="card"><h3>ล็อกเครื่องนี้</h3><p class="small muted">ลบรหัสผ่านที่จำไว้ในเครื่องนี้ (ความคืบหน้ายังอยู่)</p><div class="btns"><button class="btn" data-act="forget">ลืมรหัสผ่าน</button></div></section>`;
+    <section class="card"><h3>ผู้ใช้: ${esc(USER)}</h3><p class="small muted">ออกจากระบบเพื่อสลับผู้ใช้ ความคืบหน้าของแต่ละคนยังอยู่ครบ</p><div class="btns"><button class="btn" data-act="forget">ออกจากระบบ / สลับผู้ใช้</button></div></section>`;
 }
 
 /* ---------- quiz ---------- */
@@ -391,9 +412,9 @@ async function ensureGist() {
   if (S.sync.gist) return S.sync.gist;
   const r = await fetch(`${GH}/gists?per_page=100`, { headers: ghHeaders() });
   if (!r.ok) throw new Error(r.status === 401 ? "token ไม่ถูกต้อง" : "เชื่อม GitHub ไม่สำเร็จ");
-  const found = (await r.json()).find((g) => g.files && g.files["rn-passport-progress.json"]);
+  const found = (await r.json()).find((g) => g.files && g.files[gistFile()]);
   if (found) { S.sync.gist = found.id; return found.id; }
-  const c = await fetch(`${GH}/gists`, { method: "POST", headers: ghHeaders(), body: JSON.stringify({ public: false, description: "RN Passport progress", files: { "rn-passport-progress.json": { content: JSON.stringify(progressOnly()) } } }) });
+  const c = await fetch(`${GH}/gists`, { method: "POST", headers: ghHeaders(), body: JSON.stringify({ public: false, description: `RN Passport progress · ${USER}`, files: { [gistFile()]: { content: JSON.stringify(progressOnly()) } } }) });
   if (!c.ok) throw new Error("สร้าง gist ไม่สำเร็จ (token ต้องมีสิทธิ์ gist)");
   S.sync.gist = (await c.json()).id; return S.sync.gist;
 }
@@ -402,19 +423,20 @@ async function syncPull() {
   const id = await ensureGist();
   const r = await fetch(`${GH}/gists/${id}`, { headers: ghHeaders(), cache: "no-store" });
   if (!r.ok) throw new Error("ดึงข้อมูลไม่สำเร็จ");
-  const g = await r.json(), f = g.files["rn-passport-progress.json"];
+  const g = await r.json(), f = g.files[gistFile()];
+  if (!f) throw new Error("ไม่พบไฟล์ของผู้ใช้นี้ใน gist");
   let content = f.content;
   if (f.truncated) content = await (await fetch(f.raw_url)).text();
   const remote = JSON.parse(content || "{}");
-  if ((remote.updated || 0) > (S.updated || 0)) { Object.assign(S, remote); lsSet(LS_STATE, JSON.stringify(S)); buildPlan(); return "pulled"; }
+  if ((remote.updated || 0) > (S.updated || 0)) { Object.assign(S, remote); lsSet(stateKey(), JSON.stringify(S)); buildPlan(); return "pulled"; }
   return "kept";
 }
 async function syncPush() {
   try {
     const id = await ensureGist();
-    const r = await fetch(`${GH}/gists/${id}`, { method: "PATCH", headers: ghHeaders(), body: JSON.stringify({ files: { "rn-passport-progress.json": { content: JSON.stringify(progressOnly()) } } }) });
+    const r = await fetch(`${GH}/gists/${id}`, { method: "PATCH", headers: ghHeaders(), body: JSON.stringify({ files: { [gistFile()]: { content: JSON.stringify(progressOnly()) } } }) });
     if (!r.ok) throw new Error();
-    lsSet(LS_STATE, JSON.stringify(S));
+    lsSet(stateKey(), JSON.stringify(S));
   } catch (e) { toast("ซิงก์ไม่สำเร็จ จะลองใหม่ครั้งถัดไป"); }
 }
 async function syncNow(silent) {
@@ -450,7 +472,7 @@ document.addEventListener("click", async (e) => {
   else if (a === "syncNow") { await syncNow(); }
   else if (a === "exportB") { $("#backup").value = btoa(unescape(encodeURIComponent(JSON.stringify(progressOnly())))); $("#backup").select(); toast("สร้างรหัสสำรองแล้ว คัดลอกเก็บไว้"); }
   else if (a === "importB") { try { const o = JSON.parse(decodeURIComponent(escape(atob($("#backup").value.trim())))); Object.assign(S, o); S.updated = Date.now(); buildPlan(); save(); toast("นำเข้าข้อมูลแล้ว"); render(); } catch (err) { toast("รหัสไม่ถูกต้อง"); } }
-  else if (a === "forget") { try { localStorage.removeItem(LS_KEY); } catch (err) { } location.reload(); }
+  else if (a === "forget") { try { localStorage.removeItem(LS_KEY); localStorage.removeItem(LS_USER); } catch (err) { } location.reload(); }
 });
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && S && S.sync.token && !quiz) syncNow(true); });
 
