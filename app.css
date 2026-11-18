@@ -87,6 +87,9 @@ p{margin:0}
 .week:last-child{border-bottom:0}
 .dots{display:flex;gap:6px;flex-wrap:wrap}
 .dot{width:30px;height:30px;border-radius:8px;display:grid;place-items:center;font-size:.72rem;font-family:var(--f-mono);border:1px solid var(--line);background:var(--surface-2)}
+button.dot{cursor:pointer;font:inherit;font-size:.72rem;font-family:var(--f-mono);color:inherit}
+.daynav{justify-content:space-between}
+.daynav .btn{flex:1 1 auto}
 .dot.done{background:var(--ok);border-color:var(--ok);color:#fff}
 .dot.cur{background:var(--teal-soft);border-color:var(--teal);color:var(--teal);font-weight:600}
 .dot.sat{border-style:dashed}
