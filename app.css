@@ -91,6 +91,7 @@ button.dot{cursor:pointer;font:inherit;font-size:.72rem;font-family:var(--f-mono
 .daynav{justify-content:space-between}
 .daynav .btn{flex:1 1 auto}
 .dot.done{background:var(--ok);border-color:var(--ok);color:#fff}
+.dot.fail{background:var(--bad-soft);border-color:var(--bad);color:var(--bad)}
 .dot.cur{background:var(--teal-soft);border-color:var(--teal);color:var(--teal);font-weight:600}
 .dot.sat{border-style:dashed}
 .statgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}

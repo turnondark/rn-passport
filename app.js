@@ -94,7 +94,7 @@ function showLock(enc, err, picked) {
 }
 
 /* ---------- state ---------- */
-function freshState() { return { v: 1, updated: 0, start: DEFAULT_START, days: {}, qs: {}, sync: { token: "", gist: "" } }; }
+function freshState() { return { v: 2, updated: 0, start: DEFAULT_START, byDate: {}, days: {}, qs: {}, sync: { token: "", gist: "" } }; }
 function loadState() {
   try {
     let r = lsGet(stateKey());
@@ -151,10 +151,31 @@ function buildPlan() {
   }
 }
 const modById = (id) => D.modules.find((m) => m.id === id);
-function dayRec(i) { const r = S.days[i] || (S.days[i] = {}); r.q = r.q || {}; return r; }
-const quizRec = (dayIdx, mi) => (S.days[dayIdx] && S.days[dayIdx].q && S.days[dayIdx].q[mi]) || null;
+/* Progress is keyed by calendar date + exam kind (not by position in the plan),
+   so later app updates that reshuffle missions cannot make a passed day look unpassed. */
+const mKey = (ms) => (ms.kind === "phase" ? "phase" + ms.phase : ms.kind);
+function dayRec(i) { const k = PLAN[i].date, r = S.byDate[k] || (S.byDate[k] = {}); r.q = r.q || {}; return r; }
+function quizRec(dayIdx, mi) { const d = PLAN[dayIdx], r = d && S.byDate[d.date]; return (r && r.q && r.q[mKey(d.missions[mi])]) || null; }
+function migrateState() {
+  // older builds stored progress by plan position (S.days[idx].quiz or .q[missionIndex])
+  S.byDate = S.byDate || {};
+  for (const [k, r] of Object.entries(S.days || {})) {
+    const day = PLAN[+k]; if (!day || !r) continue;
+    const n = S.byDate[day.date] || (S.byDate[day.date] = {}); n.q = n.q || {};
+    for (const f of ["read", "check", "reviewDone", "celebrated"]) if (r[f]) n[f] = true;
+    const firstQuiz = day.missions.find((m) => m.k === "quiz");
+    const put = (ms, rec) => {
+      if (!ms || !rec) return;
+      const key = mKey(ms), cur = n.q[key] || {};
+      n.q[key] = Object.assign({}, cur, rec, { passed: !!(rec.passed || cur.passed), best: Math.max(rec.best || 0, cur.best || 0), attempts: Math.max(rec.attempts || 0, cur.attempts || 0) });
+    };
+    if (r.quiz) put(firstQuiz, r.quiz);
+    if (r.q) for (const [mi, rec] of Object.entries(r.q)) { const m = day.missions[+mi]; put(m && m.k === "quiz" ? m : firstQuiz, rec); }
+  }
+  S.days = {}; S.v = 2;
+}
 function missionDone(day, mi) {
-  const r = S.days[day.idx] || {}, ms = day.missions[mi];
+  const r = S.byDate[day.date] || {}, ms = day.missions[mi];
   if (ms.k === "read") return !!r.read;
   if (ms.k === "check") return !!r.check;
   if (ms.k === "quiz") { const q = quizRec(day.idx, mi); return !!(q && q.passed); }
@@ -184,7 +205,7 @@ function pickQuestions(day, ms, mi) {
     const set = [];
     for (const di of ms.weekDays) { const dq = quizRec(di, PLAN[di].missions.findIndex((x) => x.k === "quiz")); for (const n of (dq && dq.list) || []) if (!set.includes(n)) set.push(n); }
     if (set.length < ms.size) for (const n of pickQuestions(day, { kind: "daily", size: ms.size * 2 })) { if (set.length >= ms.size) break; if (!set.includes(n)) set.push(n); }
-    dayRec(day.idx).q[mi] = Object.assign(rec || { attempts: 0, best: 0, passed: false }, { set: set.slice(0, ms.size) });
+    dayRec(day.idx).q[mKey(ms)] = Object.assign(rec || { attempts: 0, best: 0, passed: false }, { set: set.slice(0, ms.size) });
     return shuffle(set.slice(0, ms.size));
   }
   if (ms.kind === "phase") {
@@ -247,11 +268,12 @@ function header(day) {
     <div class="bar"><i style="width:${(doneCount / PLAN.length) * 100}%"></i></div>
     <div class="row small"><span>ผ่านแล้ว ${doneCount}/${PLAN.length} วัน</span><span>เป้าสอบ NCLEX ≈ ${parseYmd(examDate).toLocaleDateString("th-TH", { month: "short", year: "numeric" })}</span></div></header>`;
 }
-const shownIdx = () => (viewIdx != null && viewIdx <= currentIdx() ? viewIdx : currentIdx());
+const shownIdx = () => (viewIdx != null && viewIdx < PLAN.length ? viewIdx : currentIdx());
 function viewToday() {
   const cur = currentIdx(), ci = shownIdx(), day = PLAN[ci], rec = dayRec(ci), past = ci < cur;
   let h = header(day);
-  h += `<div class="btns daynav"><button class="btn" data-act="dayprev" ${ci > 0 ? "" : "disabled"}>‹ วันก่อนหน้า</button>${past ? `<button class="btn primary" data-act="daycur">ไปวันปัจจุบัน (วันที่ ${cur + 1}) »</button>` : ""}<button class="btn" data-act="daynext" ${ci < cur ? "" : "disabled"}>วันถัดไป ›</button></div>`;
+  h += `<div class="btns daynav"><button class="btn" data-act="dayprev" ${ci > 0 ? "" : "disabled"}>‹ วันก่อนหน้า</button><button class="btn" data-act="daynext" ${ci < PLAN.length - 1 ? "" : "disabled"}>วันถัดไป ›</button></div>`;
+  if (ci > cur) h += `<section class="card"><b>⏩ ทำล่วงหน้า: วันที่ ${ci + 1}</b><span class="small muted">วันที่ ${cur + 1} ยังไม่ผ่าน กลับไปทำทีหลังได้ทุกเมื่อ</span><div class="btns"><button class="btn" data-act="daycur">กลับไปวันที่ ${cur + 1}</button></div></section>`;
   if (past) h += `<section class="card"><b>📖 ทบทวนวันที่ ${ci + 1} (ผ่านแล้ว)</b><span class="small muted">ทำข้อสอบซ้ำได้ ทั้งชุดเดิมและชุดใหม่ ผลที่ทำซ้ำไม่เปลี่ยนสถานะ "ผ่าน" ของวันนี้</span></section>`;
   if (past) { day.missions.forEach((ms, i) => { h += missionCard(day, ms, i, rec, true); }); return h; }
   if (celebrate != null) { h += dayDoneCard(PLAN[celebrate]).replace('data-act="daycur">ทำวันถัดไปเลย →', 'data-act="daycur">เริ่มวันที่ ' + (ci + 1) + ' ด้านล่างได้เลย ↓'); celebrate = null; }
@@ -259,7 +281,7 @@ function viewToday() {
   if (day.date > today()) h += `<section class="card"><span class="small">คุณทำล่วงหน้าแผนอยู่ ภารกิจนี้ตามปฏิทินคือ ${thDate(day.date)}</span></section>`;
   day.missions.forEach((ms, i) => { h += missionCard(day, ms, i, rec); });
   const next = PLAN[ci + 1];
-  if (next) h += `<section class="card locked"><span class="mono small muted">🔒 วันถัดไป · ${thDate(next.date)}</span><b>${esc(next.label)}</b><span class="small muted">ผ่านภารกิจวันนี้ครบทุกข้อแล้ว เปิดทำต่อได้ทันที ไม่ต้องรอวันใหม่</span></section>`;
+  if (next) h += `<section class="card"><span class="mono small muted">วันถัดไป · ${thDate(next.date)}</span><b>${esc(next.label)}</b><span class="small muted">เปิดทำได้ทุกเมื่อ ไม่ต้องรอให้วันนี้ผ่านก่อน</span><div class="btns"><button class="btn" data-act="daynext">ไปวันถัดไป ›</button></div></section>`;
   return h;
 }
 function missionCard(day, ms, mi, rec, past) {
@@ -298,13 +320,12 @@ function dayDoneCard(day) {
   return `<section class="card daydone"><div class="stamp">PASSED<br>DAY ${day.idx + 1}</div><h2>ผ่านภารกิจวันนี้แล้ว</h2>${next ? `<p class="small">วันถัดไปปลดล็อกแล้ว: ${esc(next.label)} (${thDate(next.date)})</p><button class="btn primary block" data-act="daycur">ทำวันถัดไปเลย →</button>` : ""}</section>`;
 }
 function viewPlan() {
-  const ci = currentIdx(); let h = `<section class="card"><h2>แผน ${Math.max(...PLAN.map((d) => d.week)) + 1} สัปดาห์</h2><p class="small muted">เริ่ม ${thDate(S.start)} · จ.–ส. · สีเขียว = ผ่านแล้ว (แตะเพื่อเปิดทบทวน), กรอบสีฟ้า = วันปัจจุบัน</p></section><section class="card">`;
+  const ci = currentIdx(); let h = `<section class="card"><h2>แผน ${Math.max(...PLAN.map((d) => d.week)) + 1} สัปดาห์</h2><p class="small muted">เริ่ม ${thDate(S.start)} · จ.–ส. · แตะวันไหนก็เปิดได้ · สีเขียว = ผ่านแล้ว · สีแดง = ทำแล้วยังไม่ผ่าน · กรอบสีฟ้า = วันที่ต้องทำต่อ</p></section><section class="card">`;
   const weeks = {}; PLAN.forEach((d) => (weeks[d.week] = weeks[d.week] || []).push(d));
   for (const [w, days] of Object.entries(weeks)) {
     h += `<div class="week" ${+w === PLAN[ci].week ? 'id="curweek"' : ""}><div class="row" style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap"><b>สัปดาห์ ${+w + 1} · ${esc(days[0].label)}</b><span class="small muted mono">${thDate(days[0].date)}</span></div>
-    <div class="dots">${days.map((d) => d.idx <= ci
-      ? `<button class="dot ${dayDone(d) ? "done" : "cur"} ${d.dow === 5 ? "sat" : ""}" data-act="openday" data-d="${d.idx}" title="${thDate(d.date)}" aria-label="เปิดวันที่ ${d.idx + 1}">${DOW[d.dow].slice(0, 2)}</button>`
-      : `<span class="dot ${d.dow === 5 ? "sat" : ""}" title="${thDate(d.date)} (ล็อก)">${DOW[d.dow].slice(0, 2)}</span>`).join("")}</div></div>`;
+    <div class="dots">${days.map((d) => { const tried = d.missions.some((m, mi) => { const q = m.k === "quiz" && quizRec(d.idx, mi); return q && q.attempts && !q.passed; });
+      return `<button class="dot ${dayDone(d) ? "done" : d.idx === ci ? "cur" : tried ? "fail" : ""} ${d.dow === 5 ? "sat" : ""}" data-act="openday" data-d="${d.idx}" title="${thDate(d.date)}" aria-label="เปิดวันที่ ${d.idx + 1}">${DOW[d.dow].slice(0, 2)}</button>`; }).join("")}</div></div>`;
   }
   return h + `</section>`;
 }
@@ -401,7 +422,7 @@ function renderQuizEnd() {
     if (z.day != null) {
       const rec = dayRec(z.day);
       if (z.kind === "review") rec.reviewDone = true;
-      else { const q = rec.q[z.mi] || { attempts: 0, best: 0, passed: false }; q.attempts++; q.best = Math.max(q.best, pct); if (passed && !q.passed) q.list = z.list.slice(); q.passed = q.passed || passed; rec.q[z.mi] = q; }
+      else { const key = mKey(PLAN[z.day].missions[z.mi]), q = rec.q[key] || { attempts: 0, best: 0, passed: false }; q.attempts++; q.best = Math.max(q.best, pct); if (passed && !q.passed) q.list = z.list.slice(); q.passed = q.passed || passed; rec.q[key] = q; }
     }
     save();
   }
@@ -426,7 +447,7 @@ async function ensureGist() {
   if (!c.ok) throw new Error("สร้าง gist ไม่สำเร็จ (token ต้องมีสิทธิ์ gist)");
   S.sync.gist = (await c.json()).id; return S.sync.gist;
 }
-const progressOnly = () => ({ v: S.v, updated: S.updated, start: S.start, days: S.days, qs: S.qs });
+const progressOnly = () => ({ v: S.v, updated: S.updated, start: S.start, byDate: S.byDate, days: S.days, qs: S.qs });
 async function syncPull() {
   const id = await ensureGist();
   const r = await fetch(`${GH}/gists/${id}`, { headers: ghHeaders(), cache: "no-store" });
@@ -436,7 +457,7 @@ async function syncPull() {
   let content = f.content;
   if (f.truncated) content = await (await fetch(f.raw_url)).text();
   const remote = JSON.parse(content || "{}");
-  if ((remote.updated || 0) > (S.updated || 0)) { Object.assign(S, remote); lsSet(stateKey(), JSON.stringify(S)); buildPlan(); return "pulled"; }
+  if ((remote.updated || 0) > (S.updated || 0)) { Object.assign(S, remote); buildPlan(); migrateState(); lsSet(stateKey(), JSON.stringify(S)); return "pulled"; }
   return "kept";
 }
 async function syncPush() {
@@ -459,7 +480,7 @@ document.addEventListener("click", async (e) => {
   if (t.dataset.tab) { tab = t.dataset.tab; if (tab === "today") viewIdx = null; render(); window.scrollTo(0, 0); if (tab === "plan") setTimeout(() => $("#curweek")?.scrollIntoView({ block: "center" }), 50); return; }
   const a = t.dataset.act, ci = shownIdx(), day = PLAN[ci];
   if (a === "dayprev") { viewIdx = Math.max(0, ci - 1); render(); window.scrollTo(0, 0); return; }
-  if (a === "daynext") { viewIdx = ci + 1 >= currentIdx() ? null : ci + 1; render(); window.scrollTo(0, 0); return; }
+  if (a === "daynext") { viewIdx = Math.min(PLAN.length - 1, ci + 1); if (viewIdx === currentIdx()) viewIdx = null; render(); window.scrollTo(0, 0); return; }
   if (a === "daycur") { viewIdx = null; render(); window.scrollTo(0, 0); return; }
   if (a === "openday") { viewIdx = +t.dataset.d; tab = "today"; render(); window.scrollTo(0, 0); return; }
   if (a === "quizsame") { const mi = +t.dataset.mi, ms = day.missions[mi], r = quizRec(ci, mi); openQuiz(ms.kind, shuffle((r.set || r.list).slice()), { day: ci, mi, need: ms.need, minutes: ms.minutes, title: (ms.title || `ข้อสอบ ${day.label}`) + " · ชุดเดิม" }); return; }
@@ -481,14 +502,14 @@ document.addEventListener("click", async (e) => {
   else if (a === "qdone") {
     const z = quiz; quiz = null;
     // the exam just finished the day: celebrate on top of the newly unlocked day
-    if (z.day != null && viewIdx == null && dayDone(PLAN[z.day]) && z.day < currentIdx() && !(S.days[z.day] || {}).celebrated) { celebrate = z.day; S.days[z.day].celebrated = true; save(false); }
+    if (z.day != null && viewIdx == null && dayDone(PLAN[z.day]) && z.day < currentIdx() && !dayRec(z.day).celebrated) { celebrate = z.day; dayRec(z.day).celebrated = true; save(false); }
     render(); window.scrollTo(0, 0);
   }
   else if (a === "saveStart") { const v = $("#startDate").value; if (!v) return; if (parseYmd(v).getDay() !== 1) { toast("กรุณาเลือกวันจันทร์"); return; } S.start = v; buildPlan(); save(); toast("บันทึกวันเริ่มแล้ว"); render(); }
   else if (a === "saveToken") { S.sync.token = $("#token").value.trim(); S.sync.gist = ""; save(false); await syncNow(); }
   else if (a === "syncNow") { await syncNow(); }
   else if (a === "exportB") { $("#backup").value = btoa(unescape(encodeURIComponent(JSON.stringify(progressOnly())))); $("#backup").select(); toast("สร้างรหัสสำรองแล้ว คัดลอกเก็บไว้"); }
-  else if (a === "importB") { try { const o = JSON.parse(decodeURIComponent(escape(atob($("#backup").value.trim())))); Object.assign(S, o); S.updated = Date.now(); buildPlan(); save(); toast("นำเข้าข้อมูลแล้ว"); render(); } catch (err) { toast("รหัสไม่ถูกต้อง"); } }
+  else if (a === "importB") { try { const o = JSON.parse(decodeURIComponent(escape(atob($("#backup").value.trim())))); Object.assign(S, o); S.updated = Date.now(); buildPlan(); migrateState(); save(); toast("นำเข้าข้อมูลแล้ว"); render(); } catch (err) { toast("รหัสไม่ถูกต้อง"); } }
   else if (a === "forget") { try { localStorage.removeItem(LS_KEY); localStorage.removeItem(LS_USER); } catch (err) { } location.reload(); }
 });
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && S && S.sync.token && !quiz) syncNow(true); });
@@ -496,7 +517,7 @@ document.addEventListener("visibilitychange", () => { if (document.visibilitySta
 /* ---------- start ---------- */
 function start(data) {
   D = data; Q = {}; for (const q of D.questions) Q[q.n] = q;
-  S = loadState(); buildPlan(); render();
+  S = loadState(); buildPlan(); migrateState(); save(false); render();
   if (S.sync.token) syncNow(true);
 }
 boot();
