@@ -20,6 +20,8 @@ let D = null;      // decrypted course data
 let Q = {};        // n -> question
 let S = null;      // progress state
 let PLAN = [];     // study days
+let MODE = "nclex"; // "nclex" | "eng" (English mode lives in eng.js)
+const modeKey = () => `rnp-mode-${USER}`;
 let tab = "today", quiz = null, syncTimer = null, viewIdx = null, celebrate = null; // viewIdx: a past day being revisited
 
 /* ---------- utils ---------- */
@@ -246,10 +248,14 @@ function recordAnswer(n, ok, isReview) {
 }
 
 /* ---------- views ---------- */
+function modeSwitch() {
+  return `<div class="modesw" role="group" aria-label="เลือกวิชา">${[["nclex", "NCLEX"], ["eng", "English"]].map(([m, l]) => `<button data-act="mode" data-m="${m}" aria-pressed="${MODE === m}">${l}</button>`).join("")}</div>`;
+}
 function render() {
+  if (MODE === "eng") return ENG.render();
   if (quiz) return renderQuiz();
   const v = tab === "today" ? viewToday() : tab === "plan" ? viewPlan() : tab === "review" ? viewReviewTab() : tab === "stats" ? viewStats() : viewSettings();
-  $("#app").innerHTML = `<main class="wrap">${v}</main>${nav()}`;
+  $("#app").innerHTML = `<main class="wrap">${modeSwitch()}${v}</main>${nav()}`;
 }
 function nav() {
   const items = [["today", "วันนี้", '<path d="M4 6h16M4 12h16M4 18h10"/>'], ["plan", "แผน", '<rect x="4" y="5" width="16" height="15" rx="2"/><path d="M8 3v4M16 3v4M4 10h16"/>'],
@@ -447,7 +453,7 @@ async function ensureGist() {
   if (!c.ok) throw new Error("สร้าง gist ไม่สำเร็จ (token ต้องมีสิทธิ์ gist)");
   S.sync.gist = (await c.json()).id; return S.sync.gist;
 }
-const progressOnly = () => ({ v: S.v, updated: S.updated, start: S.start, byDate: S.byDate, days: S.days, qs: S.qs });
+const progressOnly = () => ({ v: S.v, updated: S.updated, start: S.start, byDate: S.byDate, days: S.days, qs: S.qs, eng: S.eng });
 async function syncPull() {
   const id = await ensureGist();
   const r = await fetch(`${GH}/gists/${id}`, { headers: ghHeaders(), cache: "no-store" });
@@ -477,6 +483,8 @@ async function syncNow(silent) {
 /* ---------- events ---------- */
 document.addEventListener("click", async (e) => {
   const t = e.target.closest("[data-act],[data-tab]"); if (!t) return;
+  if (t.dataset.act === "mode") { MODE = t.dataset.m; lsSet(modeKey(), MODE); render(); window.scrollTo(0, 0); return; }
+  if (MODE === "eng" && ENG.click(t)) return;
   if (t.dataset.tab) { tab = t.dataset.tab; if (tab === "today") viewIdx = null; render(); window.scrollTo(0, 0); if (tab === "plan") setTimeout(() => $("#curweek")?.scrollIntoView({ block: "center" }), 50); return; }
   const a = t.dataset.act, ci = shownIdx(), day = PLAN[ci];
   if (a === "dayprev") { viewIdx = Math.max(0, ci - 1); render(); window.scrollTo(0, 0); return; }
@@ -512,12 +520,15 @@ document.addEventListener("click", async (e) => {
   else if (a === "importB") { try { const o = JSON.parse(decodeURIComponent(escape(atob($("#backup").value.trim())))); Object.assign(S, o); S.updated = Date.now(); buildPlan(); migrateState(); save(); toast("นำเข้าข้อมูลแล้ว"); render(); } catch (err) { toast("รหัสไม่ถูกต้อง"); } }
   else if (a === "forget") { try { localStorage.removeItem(LS_KEY); localStorage.removeItem(LS_USER); } catch (err) { } location.reload(); }
 });
-document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && S && S.sync.token && !quiz) syncNow(true); });
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && S && S.sync.token && !quiz && !ENG.busy()) syncNow(true); });
 
 /* ---------- start ---------- */
 function start(data) {
   D = data; Q = {}; for (const q of D.questions) Q[q.n] = q;
-  S = loadState(); buildPlan(); migrateState(); save(false); render();
+  S = loadState(); buildPlan(); migrateState(); save(false);
+  MODE = lsGet(modeKey()) === "eng" ? "eng" : "nclex";
+  if (MODE === "eng") ENG.load();
+  render();
   if (S.sync.token) syncNow(true);
 }
 boot();
